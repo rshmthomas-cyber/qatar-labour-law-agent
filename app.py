@@ -2,6 +2,7 @@ import streamlit as st
 import chromadb
 import anthropic
 import fitz
+import os
 
 # --- Page Config ---
 st.set_page_config(
@@ -40,12 +41,14 @@ def load_agent():
 # --- Sidebar ---
 with st.sidebar:
     st.header("🔑 Configuration")
-    api_key = st.text_input(
-        "Claude API Key",
-        type="password",
-        placeholder="sk-ant-..."
-    )
-    st.caption("Your key is never stored or shared.")
+    api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        api_key = st.sidebar.text_input(
+            "Claude API Key",
+            type="password",
+            placeholder="sk-ant-..."
+        )
+    st.sidebar.caption("Your key is never stored or shared.")
     st.divider()
     st.markdown("**💡 Sample Questions**")
     st.markdown("- What is the notice period for resignation?")
