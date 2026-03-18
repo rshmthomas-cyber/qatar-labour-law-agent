@@ -4,6 +4,24 @@ import anthropic
 import fitz
 import os
 
+# Password protection
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    
+    if not st.session_state.authenticated:
+        st.title("⚖️ Qatar Labour Law Assistant")
+        password = st.text_input("Enter password to access:", type="password")
+        if st.button("Login"):
+            if password == st.secrets.get("APP_PASSWORD", "qatar2026"):
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Incorrect password")
+        st.stop()
+
+check_password()
+
 # --- Page Config ---
 st.set_page_config(
     page_title="Qatar Labour Law Assistant",
