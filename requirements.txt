@@ -1,4 +1,4 @@
 streamlit
 anthropic
-chromadb
+chromadb==0.4.24
 pymupdf
