@@ -5,6 +5,29 @@ import fitz
 import re
 import os
 
+
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if not st.session_state.authenticated:
+        st.title("⚖️ Qatar Labour Law Assistant")
+        st.markdown("Please enter the password to access this tool.")
+        password = st.text_input("Password", type="password")
+        if st.button("Login"):
+            try:
+                correct = st.secrets.get("APP_PASSWORD", "qatar2024")
+            except:
+                correct = "qatar2022"
+            if password == correct:
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Incorrect password. Please try again.")
+        st.stop()
+
+check_password()
+
 st.set_page_config(
     page_title="Qatar Labour Law Assistant",
     page_icon="⚖️",
