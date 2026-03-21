@@ -2,3 +2,4 @@ streamlit
 anthropic
 chromadb==0.4.24
 pymupdf
+numpy==1.26.4
