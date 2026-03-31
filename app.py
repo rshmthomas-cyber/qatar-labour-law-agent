@@ -1,11 +1,16 @@
 import streamlit as st
-import chromadb
 import anthropic
 import fitz
 import re
 import os
 
+st.set_page_config(
+    page_title="Qatar Labour Law Assistant",
+    page_icon="⚖️",
+    layout="centered"
+)
 
+# --- Password Protection ---
 def check_password():
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
@@ -16,9 +21,9 @@ def check_password():
         password = st.text_input("Password", type="password")
         if st.button("Login"):
             try:
-                correct = st.secrets.get("APP_PASSWORD", "qatar2024")
+                correct = st.secrets.get("APP_PASSWORD", "qatar2022")
             except:
-                correct = "qatar2022"
+                correct = "qatar2024"
             if password == correct:
                 st.session_state.authenticated = True
                 st.rerun()
@@ -28,18 +33,10 @@ def check_password():
 
 check_password()
 
-st.set_page_config(
-    page_title="Qatar Labour Law Assistant",
-    page_icon="⚖️",
-    layout="centered"
-)
-
 # --- Article-based chunking ---
 def chunk_by_article(text):
-    """Split text at Article boundaries — respects legal document structure"""
     pattern = r'(?=Article\s*\(\d+\))'
     parts = re.split(pattern, text, flags=re.IGNORECASE)
-
     chunks = []
     for part in parts:
         part = part.strip()
@@ -56,55 +53,173 @@ def chunk_by_article(text):
     return chunks
 
 
-# --- Smart retrieval: direct Article lookup + semantic search ---
-def get_relevant_chunks(collection, question, all_chunks, n_results=5):
-    """
-    Direct text search for Article number queries.
-    Semantic search for everything else.
-    Combines both for best results.
-    """
-    article_match = re.search(r'article\s*\(?(\d+)\)?', question, re.IGNORECASE)
+# --- Tool functions ---
+def search_by_topic(query, chunks, n=5):
+    """Search chunks by keyword relevance"""
+    query_words = set(query.lower().split())
+    scored = []
+    for chunk in chunks:
+        chunk_words = set(chunk.lower().split())
+        score = len(query_words & chunk_words)
+        if score > 0:
+            scored.append((score, chunk))
+    scored.sort(reverse=True)
+    return [c for _, c in scored[:n]]
 
-    if article_match:
-        article_num = article_match.group(1)
-        search_pattern = f"Article ({article_num})"
+def get_article_by_number(article_num, chunks):
+    """Get specific article by number — direct text match"""
+    pattern = f"Article ({article_num})"
+    results = [c for c in chunks if pattern in c]
+    return results[:2] if results else [f"Article ({article_num}) was not found in the provided law document."]
 
-        # Direct text search — guaranteed to find the right Article
-        direct_chunks = []
-        for chunk in all_chunks:
-            if search_pattern in chunk:
-                direct_chunks.append(chunk)
+def compare_articles(article_numbers, chunks):
+    """Get multiple articles for comparison"""
+    results = []
+    for num in article_numbers:
+        articles = get_article_by_number(num, chunks)
+        results.extend(articles)
+    return results
 
-        # Also semantic search for related context
-        semantic = collection.query(
-            query_texts=[question],
-            n_results=3
+
+# --- Tool definitions for Claude ---
+tools = [
+    {
+        "name": "search_by_topic",
+        "description": "Search the Qatar Labour Law by topic or keyword. Use this for general questions about rights, obligations, leave, salary, termination, working hours etc.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The topic to search for e.g. 'overtime pay', 'annual leave', 'termination notice', 'gratuity calculation'"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "get_article_by_number",
+        "description": "Get a specific Article by its number. Use this when the user asks about a specific Article number like 'what is article 47'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "article_number": {
+                    "type": "string",
+                    "description": "The Article number e.g. '47', '73', '51'"
+                }
+            },
+            "required": ["article_number"]
+        }
+    },
+    {
+        "name": "compare_articles",
+        "description": "Get multiple Articles to compare them side by side. Use when user asks to compare two topics or wants to understand differences between rights.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "article_numbers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of Article numbers to retrieve e.g. ['47', '51', '54']"
+                }
+            },
+            "required": ["article_numbers"]
+        }
+    }
+]
+
+
+# --- Agentic loop ---
+def run_agent(question, chunks, api_key, status_container):
+    """Run the agentic loop — Claude decides which tools to use"""
+    client = anthropic.Anthropic(api_key=api_key)
+
+    messages = [{"role": "user", "content": question}]
+
+    system = """You are an expert Qatar Labour Law assistant helping workers and employers in Qatar understand their legal rights and obligations.
+
+You have access to tools to search the Qatar Labour Law document. Always use tools to find relevant Articles before answering.
+
+INSTRUCTIONS:
+- Always use tools first to find relevant legal text
+- Cite specific Article numbers in your final answer
+- Give complete, thorough answers — do not cut answers short
+- Use clear bullet points and structure for readability
+- For calculations (gratuity, leave pay etc), show the formula clearly
+- Never say you cannot answer — always try to help with what is available
+- If something is not in the law document, say so clearly"""
+
+    tools_used = []
+
+    # Agentic loop
+    while True:
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2000,
+            system=system,
+            tools=tools,
+            messages=messages
         )
-        semantic_docs = semantic['documents'][0]
 
-        # Combine — direct match first, semantic context after
-        combined = direct_chunks.copy()
-        for doc in semantic_docs:
-            if doc not in combined:
-                combined.append(doc)
-        return combined[:6]
-    else:
-        # Regular semantic search for topic-based questions
-        results = collection.query(
-            query_texts=[question],
-            n_results=n_results
-        )
-        return results['documents'][0]
+        # Claude wants to use a tool
+        if response.stop_reason == "tool_use":
+            messages.append({
+                "role": "assistant",
+                "content": response.content
+            })
+
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    tools_used.append(f"🔍 Searching: *{block.input.get('query', block.input.get('article_number', block.input.get('article_numbers', '')))}*")
+                    status_container.markdown("\n".join(tools_used))
+
+                    # Execute the tool
+                    if block.name == "search_by_topic":
+                        result = search_by_topic(block.input["query"], chunks)
+                        result_text = "\n\n---\n\n".join(result)
+
+                    elif block.name == "get_article_by_number":
+                        result = get_article_by_number(block.input["article_number"], chunks)
+                        result_text = "\n\n---\n\n".join(result)
+
+                    elif block.name == "compare_articles":
+                        result = compare_articles(block.input["article_numbers"], chunks)
+                        result_text = "\n\n---\n\n".join(result)
+
+                    else:
+                        result_text = "Tool not found"
+
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_text
+                    })
+
+            messages.append({
+                "role": "user",
+                "content": tool_results
+            })
+
+        # Claude has finished — return final answer
+        elif response.stop_reason == "end_turn":
+            final_answer = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    final_answer = block.text
+            return final_answer
+
+        else:
+            return "Something went wrong. Please try again."
 
 
-# --- Load PDF and build ChromaDB ---
+# --- Load PDF ---
 @st.cache_resource
-def load_agent():
+def load_chunks():
     pdf_options = [
         "Qatar_Labor_Law_As_of_2024_1728321402.pdf",
         "qatar_labour_law.pdf"
     ]
-
     pdf_path = None
     for name in pdf_options:
         if os.path.exists(name):
@@ -112,7 +227,7 @@ def load_agent():
             break
 
     if not pdf_path:
-        st.error("PDF file not found. Please ensure the PDF is in the same folder as app.py")
+        st.error("PDF file not found.")
         st.stop()
 
     doc = fitz.open(pdf_path)
@@ -120,10 +235,8 @@ def load_agent():
     for page in doc:
         full_text += page.get_text()
 
-    # Article-based chunking
     chunks = chunk_by_article(full_text)
 
-    # Fall back to word chunking if Article pattern not found
     if len(chunks) < 10:
         words = full_text.split()
         chunks = []
@@ -133,22 +246,13 @@ def load_agent():
             chunks.append(chunk)
             i += 450
 
-    client = chromadb.EphemeralClient()
-    collection = client.create_collection(name="qatar_labour_law")
-    collection.add(
-        documents=chunks,
-        ids=[f"chunk_{i}" for i in range(len(chunks))]
-    )
-
-    # Return chunks list too — needed for direct Article lookup
-    return collection, len(chunks), pdf_path, chunks
+    return chunks, len(chunks), pdf_path
 
 
 # --- Sidebar ---
 with st.sidebar:
     st.header("⚙️ Configuration")
 
-    # Safely load API key from secrets or sidebar input
     try:
         api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     except Exception:
@@ -176,6 +280,7 @@ with st.sidebar:
         "What are the rules for overtime pay?",
         "What is Article 47?",
         "What is Article 73?",
+        "Compare resignation vs termination notice",
     ]
     for q in sample_questions:
         st.markdown(f"- {q}")
@@ -187,19 +292,21 @@ with st.sidebar:
 
     st.divider()
     st.markdown("**⚠️ Disclaimer**")
-    st.caption("For reference only. Does not constitute legal advice. Consult a legal professional for specific cases.")
+    st.caption("For reference only. Does not constitute legal advice.")
+    st.divider()
+    st.caption("🤖 Powered by Agentic RAG + Claude Sonnet")
 
 
 # --- Header ---
 st.title("⚖️ Qatar Labour Law Assistant")
-st.caption("Ask any question about Qatar Labour Law — powered by Claude AI")
+st.caption("Ask any question about Qatar Labour Law — powered by Agentic AI")
 st.divider()
 
-# --- Load collection ---
+# --- Load ---
 with st.spinner("Loading Qatar Labour Law database..."):
-    collection, chunk_count, pdf_used, all_chunks = load_agent()
+    all_chunks, chunk_count, pdf_used = load_chunks()
 
-st.caption(f"📄 Loaded {chunk_count} legal sections from {pdf_used}")
+st.caption(f"📄 Loaded {chunk_count} legal sections · Agentic RAG v2")
 
 # --- Chat history ---
 if "messages" not in st.session_state:
@@ -221,51 +328,16 @@ if question := st.chat_input("Ask a question about Qatar Labour Law..."):
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Searching the law..."):
+        # Show live tool use status
+        status = st.empty()
+        status.markdown("🤔 *Thinking...*")
 
-            # Smart retrieval — direct for Article numbers, semantic for topics
-            chunks = get_relevant_chunks(collection, question, all_chunks)
-            context = "\n\n---\n\n".join(chunks)
+        answer = run_agent(question, all_chunks, api_key, status)
 
-            # Build full conversation history for Claude
-            claude_messages = []
-            for msg in st.session_state.messages[:-1]:
-                claude_messages.append({
-                    "role": msg["role"],
-                    "content": msg["content"]
-                })
-
-            claude_messages.append({
-                "role": "user",
-                "content": f"""You are an expert Qatar Labour Law assistant helping workers and employers in Qatar understand their legal rights and obligations.
-
-INSTRUCTIONS:
-- Answer using the provided legal context below
-- Always cite the specific Article number(s) you are referencing
-- If multiple articles are relevant, cite all of them
-- Give complete, thorough answers — do not cut answers short
-- Use clear bullet points and structure for readability
-- If the exact answer is not in the context, say: "This specific detail may require consulting the full law or a legal professional" — but still share anything relevant you found
-- Never say you cannot answer — always try to help with what is available
-- For calculations (gratuity, leave pay etc), show the formula clearly
-
-LEGAL CONTEXT:
-{context}
-
-QUESTION: {question}"""
-            })
-
-            # Claude Sonnet for strong legal reasoning
-            claude = anthropic.Anthropic(api_key=api_key)
-            response = claude.messages.create(
-                model="claude-sonnet-4-5",
-                max_tokens=2000,
-                messages=claude_messages
-            )
-
-            answer = response.content[0].text
-            st.markdown(answer)
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": answer
-            })
+        # Clear status and show answer
+        status.empty()
+        st.markdown(answer)
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": answer
+        })
